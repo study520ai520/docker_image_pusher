@@ -8,14 +8,12 @@ env:
   ALIYUN_NAME_SPACE: "${{ secrets.ALIYUN_NAME_SPACE }}"
   ALIYUN_REGISTRY_USER: "${{ secrets.ALIYUN_REGISTRY_USER }}"
   ALIYUN_REGISTRY_PASSWORD: "${{ secrets.ALIYUN_REGISTRY_PASSWORD }}"
-  # 设置超时时间（单位分钟）
   DOCKER_PUSH_TIMEOUT: 120 
 jobs:
   build:
     name: Pull
     runs-on: ubuntu-latest
-    # 设置全局超时（6小时=360分钟）
-    timeout-minutes: 360  
+    timeout-minutes: 360
     
     steps:
     - name: Maximize build space
@@ -33,23 +31,29 @@ jobs:
       uses: docker/setup-buildx-action@v3
     - name: Build and push image Aliyun
       env:
-        RETRY_COUNT: 3  # 设置重试次数
+        RETRY_COUNT: 3
       run: |
+        # 允许后续命令失败继续执行
+        set +e
         docker login -u $ALIYUN_REGISTRY_USER -p $ALIYUN_REGISTRY_PASSWORD $ALIYUN_REGISTRY
         
         while IFS= read -r line || [ -n "$line" ]; do
-            [[ -z "$line" ]] && continue
-            echo "$line" | grep -q '^\s*#' && continue
+            # 隔离每个镜像的处理环境
+            (
+            # 任何失败立即退出当前子shell
+            set -e
+            
+            [[ -z "$line" ]] && exit 0
+            echo "$line" | grep -q '^\s*#' && exit 0
             
             image=$(echo "$line" | awk '{print $NF}')
             image="${image%%@*}"
             image_name_tag=$(echo "$image" | awk -F'/' '{print $NF}')
             name_space=$(echo "$image" | awk -F'/' '{if (NF==3) print $2; else if (NF==2) print $1; else ""}')
             image_name=$(echo "$image_name_tag" | awk -F':' '{print $1}')
-            
             target_image="$ALIYUN_REGISTRY/$ALIYUN_NAME_SPACE/$image_name_tag"
             
-            # 新增超时和重试机制
+            # 带重试的pull
             for ((retry=1; retry<=$RETRY_COUNT; retry++)); do
                 echo "Attempt $retry: Pulling $image"
                 if timeout 600 docker pull $image; then
@@ -63,15 +67,21 @@ jobs:
             
             docker tag $image $target_image
             
-            # 使用timeout控制推送时间
-            if timeout $DOCKER_PUSH_TIMEOUT docker push $target_image; then
-                echo "Push succeeded"
-            else
-                echo "Push timed out, retrying..."
-                docker push $target_image  # 最后尝试不带超时
+            # 带超时的push
+            if ! timeout $DOCKER_PUSH_TIMEOUT docker push $target_image; then
+                echo "Push timed out, final attempt without timeout..."
+                docker push $target_image || (echo "Final push failed"; exit 1)
             fi
             
-            # 清理镜像释放空间
+            # 清理镜像
             docker rmi $image $target_image
+            ) || { 
+                # 捕获子shell错误但继续执行
+                echo "❌ [Error] Failed to process image: $line"
+                continue 
+            }
             
         done < images.txt
+        
+        # 恢复错误处理
+        set -e
