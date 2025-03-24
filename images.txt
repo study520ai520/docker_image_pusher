@@ -1,5 +1,3 @@
-neo4j
-milvus
 zilliz/attu
 vinlic/step-free-api
 vinlic/metaso-free-api
